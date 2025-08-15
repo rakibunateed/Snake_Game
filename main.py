@@ -1,393 +1,436 @@
-from tkinter import *
+import pygame
+import sys
 import random
+import json
+from pathlib import Path
+from typing import Tuple, List, Dict
 
-# Constants
-GAME_WIDTH = 600
-GAME_HEIGHT = 600
-SPACE_SIZE = 20
-BODY_PARTS = 3
-SNAKE_COLOR = "green"
-FOOD_COLOR = "red"
-BG_COLOR = "black"
-WALL_COLOR = "#8B4513"  # Dark green for wall
+# -----------------------------
+# Configuration
+# -----------------------------
+SCREEN_WIDTH = 500
+SCREEN_HEIGHT = 720
+GRID_SIZE = 20
+GRID_WIDTH = SCREEN_WIDTH // GRID_SIZE
+GRID_HEIGHT = SCREEN_HEIGHT // GRID_SIZE
 
-# Globals
-score = 0
-direction = 'down'
-direction_changed = False  # Prevent multiple direction changes in one move
-snake = None
-food = None
-SPEED = 250  # default speed (Easy)
-score_text = None  # To hold the canvas text id for score display
+# Colors
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+DARK_GRAY = (30, 30, 30)
+GRAY = (100, 100, 100)
+GREEN = (28, 200, 120)
+DARK_GREEN = (10, 120, 70)
+RED = (230, 60, 60)
+YELLOW = (245, 210, 40)
+BLUE = (40, 130, 255)
+CHARCOAL = (54, 69, 79)
+LIGHT_GREEN = (144, 238, 144)
+MAGENTA = (255, 0, 200)
+CYAN = (0, 220, 220)
 
-window = Tk()
-window.title("Snake Game")
-window.resizable(False, False)
+# Game settings
+INITIAL_SPEED = 8
+SPEED_INCREMENT = 0.5
+HIGHSCORE_FILE = Path("highscore.json")
 
-canvas = Canvas(window, width=GAME_WIDTH, height=GAME_HEIGHT, bg=BG_COLOR)
-canvas.pack()
 
-# -------- Rounded Button helper --------
-class RoundedButton(Canvas):
-    def __init__(self, parent, width, height, cornerradius, padding, bg, fg, font, text, command=None):
-        Canvas.__init__(self, parent, borderwidth=0, relief="flat", highlightthickness=0, bg=BG_COLOR)
-        self.command = command
-        self.width = width
-        self.height = height
-        self.cornerradius = cornerradius
-        self.padding = padding
-        self.bg = bg
-        self.fg = fg
-        self.font = font
+# -----------------------------
+# Helper classes & functions
+# -----------------------------
+class Button:
+    def __init__(self, rect: pygame.Rect, text: str, font: pygame.font.Font,
+                 fg=WHITE, bg=BLUE, hover_bg=YELLOW):
+        self.rect = rect
         self.text = text
-        self.configure(width=width, height=height)
+        self.font = font
+        self.fg = fg
+        self.bg = bg
+        self.hover_bg = hover_bg
 
-        self.draw_rounded_rect()
-        self.text_id = self.create_text(width // 2, height // 2, text=text, fill=fg, font=font)
+    def draw(self, surface: pygame.Surface):
+        mouse = pygame.mouse.get_pos()
+        is_hover = self.rect.collidepoint(mouse)
+        color = self.hover_bg if is_hover else self.bg
+        pygame.draw.rect(surface, color, self.rect, border_radius=10)
+        pygame.draw.rect(surface, DARK_GRAY, self.rect, 2, border_radius=10)
+        txt = self.font.render(self.text, True, BLACK if is_hover else self.fg)
+        txt_rect = txt.get_rect(center=self.rect.center)
+        surface.blit(txt, txt_rect)
 
-        self.bind("<ButtonPress-1>", self._on_press)
-        self.bind("<ButtonRelease-1>", self._on_release)
-
-    def draw_rounded_rect(self):
-        radius = self.cornerradius
-        w = self.width
-        h = self.height
-        p = self.padding
-        bg = self.bg
-        # Clear previous shapes
-        self.delete("round_rect")
-        # Draw four arcs for corners
-        self.create_arc((p, p, p + 2*radius, p + 2*radius), start=90, extent=90, fill=bg, outline=bg, tags="round_rect")
-        self.create_arc((w - p - 2*radius, p, w - p, p + 2*radius), start=0, extent=90, fill=bg, outline=bg, tags="round_rect")
-        self.create_arc((p, h - p - 2*radius, p + 2*radius, h - p), start=180, extent=90, fill=bg, outline=bg, tags="round_rect")
-        self.create_arc((w - p - 2*radius, h - p - 2*radius, w - p, h - p), start=270, extent=90, fill=bg, outline=bg, tags="round_rect")
-        # Draw rectangles to fill edges
-        self.create_rectangle(p + radius, p, w - p - radius, h - p, fill=bg, outline=bg, tags="round_rect")
-        self.create_rectangle(p, p + radius, w - p, h - p - radius, fill=bg, outline=bg, tags="round_rect")
-
-    def _on_press(self, event):
-        self.itemconfig("round_rect", fill=self._darker_color(self.bg))
-        self.itemconfig(self.text_id, fill="white")
-
-    def _on_release(self, event):
-        self.itemconfig("round_rect", fill=self.bg)
-        self.itemconfig(self.text_id, fill=self.fg)
-        if self.command:
-            self.command()
-
-    def _darker_color(self, color):
-        color = color.lstrip("#")
-        lv = len(color)
-        rgb = tuple(int(color[i:i + lv // 3], 16) for i in range(0, lv, lv // 3))
-        dark_rgb = tuple(max(0, int(c * 0.8)) for c in rgb)
-        return "#" + "".join(f"{c:02x}" for c in dark_rgb)
+    def is_clicked(self, event: pygame.event.Event) -> bool:
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.rect.collidepoint(event.pos):
+                return True
+        return False
 
 
-class Snake:
+def grid_to_pixels(pos: Tuple[int, int]) -> Tuple[int, int]:
+    x, y = pos
+    return x * GRID_SIZE, y * GRID_SIZE
+
+
+def random_empty_cell(exclude: List[Tuple[int, int]]) -> Tuple[int, int]:
+    while True:
+        pos = (random.randint(0, GRID_WIDTH - 1), random.randint(0, GRID_HEIGHT - 1))
+        if pos not in exclude:
+            return pos
+
+# -----------------------------
+# Core game class
+# -----------------------------
+class SnakeGame:
     def __init__(self):
-        self.body_size = BODY_PARTS
-        self.coordinates = []
-        self.squares = []
-        # Start snake centered and inside the walls
-        start_x = GAME_WIDTH // 2 // SPACE_SIZE * SPACE_SIZE
-        start_y = GAME_HEIGHT // 2 // SPACE_SIZE * SPACE_SIZE
-        for i in range(BODY_PARTS):
-            # Position body parts horizontally leftwards
-            self.coordinates.append((start_x - i*SPACE_SIZE, start_y))
-        for x, y in self.coordinates:
-            square = canvas.create_rectangle(
-                x, y, x + SPACE_SIZE, y + SPACE_SIZE,
-                fill=SNAKE_COLOR, tag="snake"
-            )
-            self.squares.append(square)
+        pygame.init()
+        pygame.display.set_caption("Snake Game - Pygame")
+        self.fullscreen = False
+        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+        self.clock = pygame.time.Clock()
 
+        # Fonts (swap title_font to any custom TTF if you like)
+        self.title_font = pygame.font.SysFont("arialblack", 72)
+        self.large_font = pygame.font.SysFont("segoeui", 32, bold=True)
+        self.font = pygame.font.SysFont("segoeui", 22)
+        self.small_font = pygame.font.SysFont("segoeui", 16)
 
-class Food:
-    def __init__(self):
-        max_x = (GAME_WIDTH // SPACE_SIZE) - 2
-        max_y = (GAME_HEIGHT // SPACE_SIZE) - 2
-        x = random.randint(1, max_x) * SPACE_SIZE
-        y = random.randint(1, max_y) * SPACE_SIZE
-        self.coordinates = (x, y)
-        canvas.create_oval(
-            x, y, x + SPACE_SIZE, y + SPACE_SIZE,
-            fill=FOOD_COLOR, tag="food"
-        )
+        # Themes
+        self.themes: Dict[str, Dict[str, Tuple[int, int, int]]] = {
+            "Retro": {
+                "snake_head": DARK_GREEN,
+                "snake_body": GREEN,
+                "food": RED,
+                "grid": (20, 20, 20),
+                "play_bg": (12, 12, 12),
+                "title": GREEN,
+            },
+            "Minimal": {
+                "snake_head": (220, 220, 220),
+                "snake_body": (180, 180, 180),
+                "food": (255, 120, 120),
+                "grid": (28, 28, 28),
+                "play_bg": (14, 14, 14),
+                "title": WHITE,
+            },
+            "Neon": {
+                "snake_head": (180, 255, 200),
+                "snake_body": (80, 255, 180),
+                "food": MAGENTA,
+                "grid": (35, 35, 60),
+                "play_bg": (8, 8, 16),
+                "title": CYAN,
+            },
+        }
+        self.theme_name = "Retro"
 
-# *** Updated draw_walls with brick style ***
-def draw_walls():
-    # Draw top wall bricks
-    for i in range(GAME_WIDTH // SPACE_SIZE):
-        x = i * SPACE_SIZE
-        y = 0
-        canvas.create_rectangle(
-            x, y, x + SPACE_SIZE, y + SPACE_SIZE,
-            fill=WALL_COLOR, outline="black"
-        )
+        # Menu buttons
+        btn_w, btn_h = 240, 56
+        center_x = SCREEN_WIDTH // 2
+        y = 300
+        self.start_btn = Button(pygame.Rect(center_x - btn_w // 2, y, btn_w, btn_h), "Start Game", self.large_font, fg=BLACK, bg=YELLOW, hover_bg=(200, 200, 200))
+        y += 70
+        self.mode_btn = Button(pygame.Rect(center_x - btn_w // 2, y, btn_w, btn_h), "Adventure", self.large_font, fg=BLACK, bg=YELLOW, hover_bg=(200, 200, 200))
+        y += 70
+        self.theme_btn = Button(pygame.Rect(center_x - btn_w // 2, y, btn_w, btn_h), "Retro", self.large_font, fg=BLACK, bg=YELLOW, hover_bg=(200, 200, 200))
+        y += 70
+        self.quit_btn = Button(pygame.Rect(center_x - btn_w // 2, y, btn_w, btn_h), "Quit", self.large_font, fg=WHITE, bg=RED, hover_bg=(255, 140, 140))
 
-    # Draw bottom wall bricks
-    for i in range(GAME_WIDTH // SPACE_SIZE):
-        x = i * SPACE_SIZE
-        y = GAME_HEIGHT - SPACE_SIZE
-        canvas.create_rectangle(
-            x, y, x + SPACE_SIZE, y + SPACE_SIZE,
-            fill=WALL_COLOR, outline="black"
-        )
+        # Score screen buttons
+        self.restart_btn = Button(pygame.Rect(center_x - btn_w // 2, 360, btn_w, btn_h), "Restart", self.large_font, fg=BLACK, bg=YELLOW, hover_bg=(255, 230, 120))
+        self.menu_btn = Button(pygame.Rect(center_x - btn_w // 2, 430, btn_w, btn_h), "Main Menu", self.large_font,bg=GRAY, hover_bg=(200, 200, 200))
 
-    # Draw left wall bricks
-    for i in range(GAME_HEIGHT // SPACE_SIZE):
-        x = 0
-        y = i * SPACE_SIZE
-        canvas.create_rectangle(
-            x, y, x + SPACE_SIZE, y + SPACE_SIZE,
-            fill=WALL_COLOR, outline="black"
-        )
+        # Game state & options
+        self.state = 'menu'  # 'menu', 'playing', 'score'
+        self.mode = 'Adventure'  # or 'Adventure'
 
-    # Draw right wall bricks
-    for i in range(GAME_HEIGHT // SPACE_SIZE):
-        x = GAME_WIDTH - SPACE_SIZE
-        y = i * SPACE_SIZE
-        canvas.create_rectangle(
-            x, y, x + SPACE_SIZE, y + SPACE_SIZE,
-            fill=WALL_COLOR, outline="black"
-        )
+        # High score cache
+        self.highscores = self.load_highscores()
 
-def start_menu():
-    canvas.delete("all")
+        # Game variables
+        self.reset_game()
 
-    lime_green = "#32CD32"  # vibrant lime green
-    orange_brown = "#D2691E"  # warm orange-brown (terracotta-like)
-    button_bg = "#FFA500"
-    button_fg = "white"
-    button_font = ("Comic Sans MS", 16, "bold")
+    # ------------------------
+    # High scores
+    # ------------------------
+    def load_highscores(self) -> Dict[str, int]:
+        if HIGHSCORE_FILE.exists():
+            try:
+                return json.loads(HIGHSCORE_FILE.read_text())
+            except Exception:
+                return {}
+        return {}
 
-    canvas.create_text(
-        GAME_WIDTH // 2, GAME_HEIGHT // 2 - 80,
-        text="Snake",
-        fill=lime_green,
-        font=("Comic Sans MS", 60, "bold")
-    )
-    canvas.create_text(
-        GAME_WIDTH // 2, GAME_HEIGHT // 2,
-        text="Game",
-        fill=orange_brown,
-        font=("Comic Sans MS", 60, "bold")
-    )
+    def save_highscores(self):
+        try:
+            HIGHSCORE_FILE.write_text(json.dumps(self.highscores, indent=2))
+        except Exception:
+            pass
 
-    btn_width = 120
-    btn_height = 45
-    spacing = 20
+    def get_highscore(self) -> int:
+        return int(self.highscores.get(self.mode, 0))
 
-    total_width = btn_width * 2 + spacing
-    start_x = (GAME_WIDTH - total_width) // 2
-    y_pos = GAME_HEIGHT // 2 + 70
-
-    start_btn = RoundedButton(window, btn_width, btn_height, cornerradius=15, padding=2,
-                              bg=button_bg, fg=button_fg, font=button_font, text="Start Game",
-                              command=start_game)
-    quit_btn = RoundedButton(window, btn_width, btn_height, cornerradius=15, padding=2,
-                             bg=button_bg, fg=button_fg, font=button_font, text="Quit",
-                             command=window.destroy)
-    settings_btn = RoundedButton(window, 110, 35, cornerradius=15, padding=2,
-                                bg=button_bg, fg=button_fg, font=button_font, text="Settings",
-                                command=level_menu)
-
-    canvas.create_window(start_x + btn_width // 2, y_pos, window=start_btn)
-    canvas.create_window(start_x + btn_width + spacing + btn_width // 2, y_pos, window=quit_btn)
-    canvas.create_window(GAME_WIDTH - 70, 40, window=settings_btn)
-
-
-def level_menu():
-    canvas.delete("all")
-    canvas.create_text(
-        GAME_WIDTH // 2,
-        GAME_HEIGHT // 2 - 100,
-        text="Select Difficulty Level",
-        fill="white",
-        font=('Comic Sans MS', 30, 'bold')
-    )
-    canvas.create_window(
-        GAME_WIDTH // 2,
-        GAME_HEIGHT // 2 - 30,
-        window=RoundedButton(window, 140, 40, 15, 2, "#FFA500", "white", ("Comic Sans MS", 16, "bold"),
-                             "Easy", lambda: set_level('easy'))
-    )
-    canvas.create_window(
-        GAME_WIDTH // 2,
-        GAME_HEIGHT // 2 + 30,
-        window=RoundedButton(window, 140, 40, 15, 2, "#FFA500", "white", ("Comic Sans MS", 16, "bold"),
-                             "Medium", lambda: set_level('medium'))
-    )
-    canvas.create_window(
-        GAME_WIDTH // 2,
-        GAME_HEIGHT // 2 + 90,
-        window=RoundedButton(window, 140, 40, 15, 2, "#FFA500", "white", ("Comic Sans MS", 16, "bold"),
-                             "Hard", lambda: set_level('hard'))
-    )
-    canvas.create_window(
-        GAME_WIDTH // 2,
-        GAME_HEIGHT // 2 + 150,
-        window=RoundedButton(window, 100, 35, 15, 2, "#FFA500", "white", ("Comic Sans MS", 12, "bold"),
-                             "Back", start_menu)
-    )
-
-
-def set_level(level):
-    global SPEED
-    if level == 'easy':
-        SPEED = 250
-    elif level == 'medium':
-        SPEED = 120
-    elif level == 'hard':
-        SPEED = 70
-    start_menu()
-
-
-def start_game():
-    global score, direction, snake, food, score_text, direction_changed
-    score = 0
-    direction = 'down'
-    direction_changed = False
-    canvas.delete("all")
-    draw_walls()
-    snake = Snake()
-    food = Food()
-    score_text = canvas.create_text(
-        GAME_WIDTH // 2, 20,
-        text=f"Score: {score}",
-        fill="white",
-        font=('consolas', 20)
-    )
-    next_turn(snake)
-
-
-def next_turn(snake_obj):
-    global direction, score, food, score_text, direction_changed
-
-    direction_changed = False
-
-    x, y = snake_obj.coordinates[0]
-    if direction == 'up':
-        y -= SPACE_SIZE
-    elif direction == 'down':
-        y += SPACE_SIZE
-    elif direction == 'left':
-        x -= SPACE_SIZE
-    elif direction == 'right':
-        x += SPACE_SIZE
-
-    snake_obj.coordinates.insert(0, (x, y))
-    square = canvas.create_rectangle(
-        x, y, x + SPACE_SIZE, y + SPACE_SIZE,
-        fill=SNAKE_COLOR
-    )
-    snake_obj.squares.insert(0, square)
-
-    if (x, y) == food.coordinates:
-        score += 1
-        canvas.itemconfigure(score_text, text=f"Score: {score}")
-        canvas.delete("food")
-        food = Food()
-    else:
-        del snake_obj.coordinates[-1]
-        canvas.delete(snake_obj.squares[-1])
-        del snake_obj.squares[-1]
-
-    if check_collisions(snake_obj):
-        game_over()
-    else:
-        window.after(SPEED, next_turn, snake_obj)
-
-
-def change_direction(new_dir):
-    global direction, direction_changed
-    opposites = {'up': 'down', 'down': 'up', 'left': 'right', 'right': 'left'}
-    if not direction_changed and new_dir != opposites.get(direction):
-        direction = new_dir
-        direction_changed = True
-
-
-def check_collisions(snake_obj):
-    x, y = snake_obj.coordinates[0]
-    # Collision with walls (edges) is already checked by boundary conditions
-    if x < SPACE_SIZE or x >= GAME_WIDTH - SPACE_SIZE or y < SPACE_SIZE or y >= GAME_HEIGHT - SPACE_SIZE:
-        return True
-    for part in snake_obj.coordinates[1:]:
-        if (x, y) == part:
+    def maybe_set_highscore(self):
+        if self.score > self.get_highscore():
+            self.highscores[self.mode] = self.score
+            self.save_highscores()
             return True
-    return False
+        return False
+
+    # ------------------------
+    # Display mode
+    # ------------------------
+    def toggle_fullscreen(self):
+        self.fullscreen = not self.fullscreen
+        flags = pygame.FULLSCREEN if self.fullscreen else 0
+        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), flags)
+
+    # ------------------------
+    # Game lifecycle
+    # ------------------------
+    def reset_game(self):
+        # Snake starts in the center with length 4
+        cx = GRID_WIDTH // 2
+        cy = GRID_HEIGHT // 2
+        self.snake = [(cx, cy), (cx - 1, cy), (cx - 2, cy), (cx - 3, cy)]
+        self.direction = (1, 0)  # moving right
+        self.next_direction = self.direction
+        # Bricks/obstacles
+        self.bricks: List[Tuple[int, int]] = []
+        # Place initial food
+        occupied = set(self.snake)
+        self.food = random_empty_cell(list(occupied))
+        self.score = 0
+        self.speed = INITIAL_SPEED
+        self.alive = True
+        self.MOVE_EVENT = pygame.USEREVENT + 1
+        pygame.time.set_timer(self.MOVE_EVENT, int(1000 / self.speed))
+
+    def set_speed_timer(self):
+        pygame.time.set_timer(self.MOVE_EVENT, max(40, int(1000 / self.speed)))
+
+    # ------------------------
+    # Event handlers
+    # ------------------------
+    def handle_menu_events(self, event):
+        if self.start_btn.is_clicked(event):
+            self.reset_game()
+            self.state = 'playing'
+        if self.mode_btn.is_clicked(event):
+            self.mode = 'Classic' if self.mode == 'Adventure' else 'Adventure'
+            self.mode_btn.text = f"{self.mode}"
+        if self.theme_btn.is_clicked(event):
+            names = list(self.themes.keys())
+            idx = names.index(self.theme_name)
+            self.theme_name = names[(idx + 1) % len(names)]
+            self.theme_btn.text = f"{self.theme_name}"
+        if self.quit_btn.is_clicked(event):
+            pygame.quit()
+            sys.exit()
+
+    def handle_score_events(self, event):
+        if self.restart_btn.is_clicked(event):
+            self.reset_game()
+            self.state = 'playing'
+        if self.menu_btn.is_clicked(event):
+            self.state = 'menu'
+        if self.quit_btn.is_clicked(event):
+            pygame.quit()
+            sys.exit()
+
+    def handle_playing_events(self, event):
+        if event.type == pygame.KEYDOWN:
+            if event.key in (pygame.K_UP, pygame.K_w) and self.direction != (0, 1):
+                self.next_direction = (0, -1)
+            elif event.key in (pygame.K_DOWN, pygame.K_s) and self.direction != (0, -1):
+                self.next_direction = (0, 1)
+            elif event.key in (pygame.K_LEFT, pygame.K_a) and self.direction != (1, 0):
+                self.next_direction = (-1, 0)
+            elif event.key in (pygame.K_RIGHT, pygame.K_d) and self.direction != (-1, 0):
+                self.next_direction = (1, 0)
+            elif event.key == pygame.K_ESCAPE:
+                # quick go to menu
+                self.state = 'menu'
+            elif event.key == pygame.K_F11:
+                self.toggle_fullscreen()
+            elif event.key == pygame.K_g:
+                # debug: force game over for preview/testing
+                pygame.time.set_timer(self.MOVE_EVENT, 0)
+                self.alive = False
+                self.state = 'score'
+        elif event.type == self.MOVE_EVENT and self.alive:
+            self.move_snake()
+
+    # ------------------------
+    # Game mechanics
+    # ------------------------
+    def move_snake(self):
+        self.direction = self.next_direction
+        head_x, head_y = self.snake[0]
+        dx, dy = self.direction
+        new_head = (head_x + dx, head_y + dy)
+
+        # Fix: The original code had the logic for Classic and Adventure modes swapped.
+        if self.mode == 'Classic':
+            # Adventure: Wrap-around
+            new_head = (new_head[0] % GRID_WIDTH, new_head[1] % GRID_HEIGHT)
+        else:  # self.mode == 'Classic'
+            # Classic: Wall collision ends game
+            if not (0 <= new_head[0] < GRID_WIDTH and 0 <= new_head[1] < GRID_HEIGHT):
+                pygame.time.set_timer(self.MOVE_EVENT, 0)
+                self.alive = False
+                self.state = 'score'
+                self.maybe_set_highscore()
+                return
+
+        # Check collision with self or bricks
+        if new_head in self.snake or new_head in self.bricks:
+            pygame.time.set_timer(self.MOVE_EVENT, 0)
+            self.alive = False
+            self.state = 'score'
+            self.maybe_set_highscore()
+            return
+
+        # Move
+        self.snake.insert(0, new_head)
+
+        # Check food
+        if new_head == self.food:
+            self.score += 10
+            # increase speed slightly every time you eat
+            self.speed += SPEED_INCREMENT
+            prev_food = self.food
+            # new food at empty cell
+            occupied = set(self.snake) | set(self.bricks)
+            self.food = random_empty_cell(list(occupied))
+            self.set_speed_timer()
+
+            # Classic: spawn a new brick where the last food was
+            if self.mode == 'Adventure':
+                if prev_food not in self.snake and prev_food not in self.bricks:
+                    self.bricks.append(prev_food)
+        else:
+            self.snake.pop()
+
+    # ------------------------
+    # Drawing
+    # ------------------------
+    def draw_grid(self, color):
+        for x in range(0, SCREEN_WIDTH, GRID_SIZE):
+            pygame.draw.line(self.screen, color, (x, 0), (x, SCREEN_HEIGHT))
+        for y in range(0, SCREEN_HEIGHT, GRID_SIZE):
+            pygame.draw.line(self.screen, color, (0, y), (SCREEN_WIDTH, y))
+
+    def draw_snake(self, head_color, body_color):
+        for i, seg in enumerate(self.snake):
+            px, py = grid_to_pixels(seg)
+            rect = pygame.Rect(px + 1, py + 1, GRID_SIZE - 2, GRID_SIZE - 2)
+            if i == 0:
+                pygame.draw.rect(self.screen, head_color, rect, border_radius=6)
+            else:
+                pygame.draw.rect(self.screen, body_color, rect, border_radius=6)
+
+    def draw_food(self, color):
+        px, py = grid_to_pixels(self.food)
+        rect = pygame.Rect(px + 4, py + 4, GRID_SIZE - 8, GRID_SIZE - 8)
+        pygame.draw.ellipse(self.screen, color, rect)
+
+    def draw_bricks(self):
+        for cell in self.bricks:
+            px, py = grid_to_pixels(cell)
+            rect = pygame.Rect(px + 1, py + 1, GRID_SIZE - 2, GRID_SIZE - 2)
+            pygame.draw.rect(self.screen, (90, 90, 110), rect, border_radius=4)
+
+    def draw_score(self):
+        score_surf = self.font.render(f"Score: {self.score}", True, WHITE)
+        self.screen.blit(score_surf, (10, 10))
+        hs = self.get_highscore()
+        hs_surf = self.small_font.render(f"High: {hs}", True, WHITE)
+        self.screen.blit(hs_surf, (10, 34))
+
+    def draw_speed(self):
+        sp_surf = self.small_font.render(f"Speed: {self.speed:.1f}", True, WHITE)
+        self.screen.blit(sp_surf, (10, 56))
+
+    # ------------------------
+    # Screens
+    # ------------------------
+    def render_menu(self):
+        theme = self.themes[self.theme_name]
+        self.screen.fill(CHARCOAL)
+        title = self.title_font.render("S N A K E", True, theme["title"])
+        title_rect = title.get_rect(center=(SCREEN_WIDTH // 2, 160))
+        self.screen.blit(title, title_rect)
+
+        # draw buttons
+        self.start_btn.draw(self.screen)
+        self.mode_btn.draw(self.screen)
+        self.theme_btn.draw(self.screen)
+        self.quit_btn.draw(self.screen)
+
+    def render_playing(self):
+        theme = self.themes[self.theme_name]
+        # background
+        self.screen.fill(theme["play_bg"])
+
+        # grid & elements
+        self.draw_grid(theme["grid"])
+        self.draw_bricks()
+        self.draw_food(theme["food"])
+        self.draw_snake(theme["snake_head"], theme["snake_body"])
+
+        # HUD
+        self.draw_score()
+        self.draw_speed()
+
+    def render_score(self):
+        theme = self.themes[self.theme_name]
+        self.screen.fill(CHARCOAL)
+        title = self.title_font.render("Game Over", True, RED)
+        title_rect = title.get_rect(center=(SCREEN_WIDTH // 2, 140))
+        self.screen.blit(title, title_rect)
+
+        score_txt = self.large_font.render(f"Your Score: {self.score}", True, WHITE)
+        score_rect = score_txt.get_rect(center=(SCREEN_WIDTH // 2, 230))
+        self.screen.blit(score_txt, score_rect)
+
+        new_record = self.maybe_set_highscore()
+        high_txt = self.font.render(
+            f"High Score ({self.mode}): {self.get_highscore()}" + ("  NEW!" if new_record else ""), True,
+            LIGHT_GREEN if new_record else WHITE)
+        high_rect = high_txt.get_rect(center=(SCREEN_WIDTH // 2, 270))
+        self.screen.blit(high_txt, high_rect)
+
+        # buttons
+        self.restart_btn.draw(self.screen)
+        self.menu_btn.draw(self.screen)
+    # ------------------------
+    # Main loop
+    # ------------------------
+    def run(self):
+        while True:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    sys.exit()
+
+                if self.state == 'menu':
+                    self.handle_menu_events(event)
+                elif self.state == 'playing':
+                    self.handle_playing_events(event)
+                elif self.state == 'score':
+                    self.handle_score_events(event)
+
+            # Render
+            if self.state == 'menu':
+                self.render_menu()
+            elif self.state == 'playing':
+                self.render_playing()
+            elif self.state == 'score':
+                self.render_score()
+
+            pygame.display.flip()
+            self.clock.tick(60)
 
 
-def game_over():
-    canvas.delete("all")
-    canvas.create_text(
-        GAME_WIDTH // 2,
-        GAME_HEIGHT // 2 - 60,
-        text="GAME OVER",
-        fill="red",
-        font=('consolas', 40)
-    )
-    canvas.create_text(
-        GAME_WIDTH // 2,
-        GAME_HEIGHT // 2,
-        text=f"YOUR SCORE: {score}",
-        fill="white",
-        font=('consolas', 30)
-    )
-    canvas.create_window(
-        GAME_WIDTH // 2 - 70,
-        GAME_HEIGHT // 2 + 60,
-        window=RoundedButton(window, 120, 45, 15, 2, "#FFA500", "white", ("Comic Sans MS", 16, "bold"),
-                             "Restart", restart_game)
-    )
-    canvas.create_window(
-        GAME_WIDTH // 2 + 70,
-        GAME_HEIGHT // 2 + 60,
-        window=RoundedButton(window, 120, 45, 15, 2, "#FFA500", "white", ("Comic Sans MS", 16, "bold"),
-                             "Menu", back_to_menu)
-    )
-    window.bind('<Return>', lambda event: restart_game())
-
-
-def restart_game():
-    window.unbind('<Return>')
-    global score, direction, snake, food, score_text, direction_changed
-    score = 0
-    direction = 'down'
-    direction_changed = False
-    canvas.delete("all")
-    draw_walls()
-    snake = Snake()
-    food = Food()
-    score_text = canvas.create_text(
-        GAME_WIDTH // 2, 20,
-        text=f"Score: {score}",
-        fill="white",
-        font=('consolas', 20)
-    )
-    next_turn(snake)
-
-
-def back_to_menu():
-    window.unbind('<Return>')
-    start_menu()
-
-
-# Center window on screen
-window.update()
-screen_width = window.winfo_screenwidth()
-screen_height = window.winfo_screenheight()
-x = (screen_width // 2) - (GAME_WIDTH // 2)
-y = (screen_height // 2) - (GAME_HEIGHT // 2)
-window.geometry(f"{GAME_WIDTH}x{GAME_HEIGHT + 60}+{x}+{y}")
-
-# Key bindings
-window.bind('<Left>', lambda event: change_direction('left'))
-window.bind('<Right>', lambda event: change_direction('right'))
-window.bind('<Up>', lambda event: change_direction('up'))
-window.bind('<Down>', lambda event: change_direction('down'))
-
-# Show start menu initially
-start_menu()
-
-window.mainloop()
+if __name__ == '__main__':
+    game = SnakeGame()
+    game.run()
